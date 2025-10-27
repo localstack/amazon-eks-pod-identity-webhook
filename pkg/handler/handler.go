@@ -74,6 +74,16 @@ func WithRegion(region string) ModifierOpt {
 	return func(m *Modifier) { m.Region = region }
 }
 
+// WithEndpoint sets the modifier endpoint url
+func WithEndpoint(endpointUrl string) ModifierOpt {
+	return func(m *Modifier) { m.EndpointUrl = endpointUrl }
+}
+
+// WithS3Endpoint sets the modifier s3 endpoint url
+func WithS3Endpoint(endpointUrl string) ModifierOpt {
+	return func(m *Modifier) { m.S3EndpointUrl = endpointUrl }
+}
+
 // WithAnnotationDomain adds an annotation domain
 func WithAnnotationDomain(domain string) ModifierOpt {
 	return func(m *Modifier) { m.AnnotationDomain = domain }
@@ -110,6 +120,8 @@ type Modifier struct {
 	AnnotationDomain           string
 	MountPath                  string
 	Region                     string
+	EndpointUrl                string
+	S3EndpointUrl              string
 	Cache                      cache.ServiceAccountCache
 	ContainerCredentialsConfig containercredentials.Config
 	volName                    string
@@ -175,6 +187,7 @@ func (m *Modifier) addEnvToContainer(container *corev1.Container, tokenFilePath 
 		containerCredentialsKeysDefined bool
 		regionKeyDefined                bool
 		regionalStsKeyDefined           bool
+		endpointKeysDefined             bool
 	)
 	webIdentityKeys := map[string]string{
 		"AWS_ROLE_ARN":                "",
@@ -189,6 +202,11 @@ func (m *Modifier) addEnvToContainer(container *corev1.Container, tokenFilePath 
 		"AWS_DEFAULT_REGION": "",
 	}
 	stsKey := "AWS_STS_REGIONAL_ENDPOINTS"
+
+	endpointKeys := map[string]string{
+		"AWS_ENDPOINT_URL":    "",
+		"AWS_ENDPOINT_URL_S3": "",
+	}
 	for _, env := range container.Env {
 		if _, ok := webIdentityKeys[env.Name]; ok {
 			klog.V(4).Infof("Web identity env variable %s is already defined in the pod spec", env)
@@ -207,11 +225,16 @@ func (m *Modifier) addEnvToContainer(container *corev1.Container, tokenFilePath 
 			klog.V(4).Infof("AWS STS env variable %s is already defined in the pod spec", env)
 			regionalStsKeyDefined = true
 		}
+		if _, ok := endpointKeys[env.Name]; ok {
+			// Don't set both region keys if any region key is already set
+			klog.V(4).Infof("AWS endpoint env variable %s is already defined in the pod spec", env)
+			endpointKeysDefined = true
+		}
 	}
 
 	if ((patchConfig.WebIdentityPatchConfig != nil && webIdentityKeysDefined) ||
 		(patchConfig.ContainerCredentialsPatchConfig != nil && containerCredentialsKeysDefined)) &&
-		regionKeyDefined && regionalStsKeyDefined {
+		regionKeyDefined && regionalStsKeyDefined && endpointKeysDefined {
 		klog.V(4).Infof("Container %s has necessary env variables already present", container.Name)
 		return false
 	}
@@ -236,6 +259,23 @@ func (m *Modifier) addEnvToContainer(container *corev1.Container, tokenFilePath 
 			Value: m.Region,
 		})
 		changed = true
+	}
+
+	if !endpointKeysDefined {
+		if m.EndpointUrl != "" {
+			env = append(env, corev1.EnvVar{
+				Name:  "AWS_ENDPOINT_URL",
+				Value: m.EndpointUrl,
+			})
+			changed = true
+		}
+		if m.S3EndpointUrl != "" {
+			env = append(env, corev1.EnvVar{
+				Name:  "AWS_ENDPOINT_URL_S3",
+				Value: m.S3EndpointUrl,
+			})
+			changed = true
+		}
 	}
 
 	if patchConfig.ContainerCredentialsPatchConfig != nil {
