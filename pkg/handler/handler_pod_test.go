@@ -53,10 +53,13 @@ const (
 	containerCredentialsTokenPathAnnotation  = "testing.eks.amazonaws.com/containercredentials/tokenPath"
 
 	// Handler values
-	handlerMountPathAnnotation  = "testing.eks.amazonaws.com/handler/mountPath"
-	handlerExpirationAnnotation = "testing.eks.amazonaws.com/handler/expiration"
-	handlerRegionAnnotation     = "testing.eks.amazonaws.com/handler/region"
-	handlerSTSAnnotation        = "testing.eks.amazonaws.com/handler/injectSTS"
+	handlerMountPathAnnotation   = "testing.eks.amazonaws.com/handler/mountPath"
+	handlerExpirationAnnotation  = "testing.eks.amazonaws.com/handler/expiration"
+	handlerRegionAnnotation      = "testing.eks.amazonaws.com/handler/region"
+	handlerSTSAnnotation         = "testing.eks.amazonaws.com/handler/injectSTS"
+	handlerEndpointAnnotation    = "testing.eks.amazonaws.com/handler/endpointUrl"
+	handlerS3EndpointAnnotation  = "testing.eks.amazonaws.com/handler/endpointUrlS3"
+	handlerStsEndpointAnnotation = "testing.eks.amazonaws.com/handler/endpointUrlSts"
 )
 
 // buildModifierFromPod gets values to set up test case environments with as if
@@ -71,6 +74,18 @@ func buildModifierFromPod(pod *corev1.Pod, t *testing.T) *Modifier {
 
 	if region, ok := pod.Annotations[handlerRegionAnnotation]; ok {
 		modifierOpts = append(modifierOpts, WithRegion(region))
+	}
+
+	if endpoint, ok := pod.Annotations[handlerEndpointAnnotation]; ok {
+		modifierOpts = append(modifierOpts, WithEndpoint(endpoint))
+	}
+
+	if endpoint, ok := pod.Annotations[handlerS3EndpointAnnotation]; ok {
+		modifierOpts = append(modifierOpts, WithS3Endpoint(endpoint))
+	}
+
+	if endpoint, ok := pod.Annotations[handlerStsEndpointAnnotation]; ok {
+		modifierOpts = append(modifierOpts, WithStsEndpoint(endpoint))
 	}
 
 	modifierOpts = append(modifierOpts, WithServiceAccountCache(buildFakeCacheFromPod(pod)))

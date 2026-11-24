@@ -77,6 +77,7 @@ func main() {
 	region := flag.String("aws-default-region", "", "If set, AWS_DEFAULT_REGION and AWS_REGION will be set to this value in mutated containers")
 	endpointUrl := flag.String("endpoint-url", "", "If set, AWS_ENDPOINT_URL will be set to this value in mutated containers")
 	endpointUrlS3 := flag.String("endpoint-url-s3", "", "If set, AWS_ENDPOINT_URL_S3 will be set to this value in mutated containers")
+	endpointUrlSts := flag.String("endpoint-url-sts", "", "If set, AWS_ENDPOINT_URL_STS will be set to this value in mutated containers")
 	regionalSTS := flag.Bool("sts-regional-endpoint", false, "Whether to inject the AWS_STS_REGIONAL_ENDPOINTS=regional env var in mutated pods. Defaults to `false`.")
 	watchConfigMap := flag.Bool("watch-config-map", false, "Enables watching serviceaccounts that are configured through the pod-identity-webhook configmap instead of using annotations")
 	composeRoleArn := flag.Bool("compose-role-arn", false, "If true, then the role name and path can be used instead of the fully qualified ARN in the `role-arn` annotation.  In this case, webhook will look up the partition and account ID using instance metadata.  Defaults to `false`.")
@@ -218,6 +219,7 @@ func main() {
 		handler.WithRegion(*region),
 		handler.WithEndpoint(*endpointUrl),
 		handler.WithS3Endpoint(*endpointUrlS3),
+		handler.WithStsEndpoint(*endpointUrlSts),
 		handler.WithSALookupGraceTime(*saLookupGracePeriod),
 	)
 
