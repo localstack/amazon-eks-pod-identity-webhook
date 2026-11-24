@@ -38,6 +38,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	flag "github.com/spf13/pflag"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/informers"
 	v1 "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes"
@@ -62,6 +65,8 @@ func main() {
 	apiURL := flag.String("kube-api", "", "(out-of-cluster) The url to the API server")
 	tlsKeyFile := flag.String("tls-key", "/etc/webhook/certs/tls.key", "(out-of-cluster) TLS key file path")
 	tlsCertFile := flag.String("tls-cert", "/etc/webhook/certs/tls.crt", "(out-of-cluster) TLS certificate file path")
+	tlsCipherSuites := flag.String("tls-cipher-suites", "", "Comma-separated list of cipher suites for the server. If omitted, the default Go cipher suites will be used")
+	tlsMinVersion := flag.String("tls-min-version", "", "The minimum TLS version to be used by the webhook server. (1.0, 1.1, 1.2, 1.3)")
 
 	// in-cluster TLS options
 	inCluster := flag.Bool("in-cluster", true, "Use in-cluster authentication and certificate request API")
@@ -137,6 +142,13 @@ func main() {
 	}
 
 	saInformer := informerFactory.Core().V1().ServiceAccounts()
+
+	// Strip ServiceAccount objects down to only the fields the cache needs
+	// (Name, Namespace, ResourceVersion, and webhook-prefixed annotations).
+	// This significantly reduces memory usage of the informer store on large
+	// clusters by dropping labels, managedFields, ownerReferences, finalizers,
+	// secrets, imagePullSecrets, and unrelated annotations.
+	saInformer.Informer().SetTransform(stripDownServiceAccount(*annotationPrefix))
 
 	*tokenExpiration = pkg.ValidateMinTokenExpiration(*tokenExpiration)
 
@@ -263,6 +275,22 @@ func main() {
 
 	tlsConfig := &tls.Config{}
 
+	if *tlsCipherSuites != "" {
+		suites, err := pkg.ValidateTLSCipherSuites(strings.Split(*tlsCipherSuites, ","))
+		if err != nil {
+			klog.Fatalf("invalid tls-cipher-suites: %v", err)
+		}
+		tlsConfig.CipherSuites = suites
+	}
+
+	if *tlsMinVersion != "" {
+		minVersion, err := pkg.ValidateTLSMinVersion(*tlsMinVersion)
+		if err != nil {
+			klog.Fatalf("Invalid value for tls-min-version %v", err)
+		}
+		tlsConfig.MinVersion = minVersion
+	}
+
 	if *inCluster {
 		csr := &x509.CertificateRequest{
 			Subject: pkix.Name{CommonName: fmt.Sprintf("%s.%s.svc", *serviceName, *namespaceName)},
@@ -359,4 +387,52 @@ func main() {
 	} else {
 		klog.Infof("Metrics server shutdown gracefully")
 	}
+}
+
+// stripDownServiceAccount returns a transform function that strips down
+// ServiceAccount objects to reduce memory usage of the informer store on
+// large clusters. The returned function keeps only the fields the webhook
+// actually reads: Name, Namespace, ResourceVersion, and annotations whose
+// keys start with the configured prefix (e.g. "eks.amazonaws.com/").
+//
+// Inputs are read via meta.Accessor so the transform is robust to any
+// metav1.Object — including *unstructured.Unstructured — not just the
+// concrete *corev1.ServiceAccount the typed informer hands us today. The
+// output is always a fresh *corev1.ServiceAccount so downstream consumers
+// of the cache can keep doing the usual type assertion.
+//
+// NOTE: if the webhook needs to read more SA fields in the future, those
+// fields need to be added here.
+func stripDownServiceAccount(annotationPrefix string) func(obj interface{}) (interface{}, error) {
+	prefix := annotationPrefix + "/"
+	return func(obj interface{}) (interface{}, error) {
+		accessor, err := meta.Accessor(obj)
+		if err != nil {
+			return obj, nil
+		}
+		return &corev1.ServiceAccount{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            accessor.GetName(),
+				Namespace:       accessor.GetNamespace(),
+				ResourceVersion: accessor.GetResourceVersion(),
+				Annotations:     filterAnnotations(accessor.GetAnnotations(), prefix),
+			},
+		}, nil
+	}
+}
+
+// filterAnnotations returns a new map containing only annotations whose keys
+// start with the given prefix. Returns nil if no matching annotations exist,
+// so the resulting ObjectMeta has no annotations map allocated at all.
+func filterAnnotations(annotations map[string]string, prefix string) map[string]string {
+	var filtered map[string]string
+	for k, v := range annotations {
+		if strings.HasPrefix(k, prefix) {
+			if filtered == nil {
+				filtered = make(map[string]string)
+			}
+			filtered[k] = v
+		}
+	}
+	return filtered
 }
