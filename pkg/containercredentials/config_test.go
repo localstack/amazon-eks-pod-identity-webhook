@@ -131,9 +131,36 @@ func TestFileConfig_Get(t *testing.T) {
 	assert.NotNil(t, patchConfig)
 	assert.Equal(t, audience, patchConfig.Audience)
 	assert.Equal(t, fullUri, patchConfig.FullUri)
+	assert.False(t, patchConfig.WorkloadIdentityEnabled)
 
 	patchConfig = fileConfig.Get("non-existent", "non-existent")
 	assert.Nil(t, patchConfig)
+}
+
+func TestFileConfig_WorkloadIdentity(t *testing.T) {
+	configObject := &IdentityConfigObject{
+		Identities: []Identity{
+			{
+				Namespace:               namespaceFoo,
+				ServiceAccount:          namespaceFooServiceAccount,
+				WorkloadIdentityEnabled: true,
+			},
+			{
+				Namespace:      namespaceBar,
+				ServiceAccount: namespaceBarServiceAccount,
+			},
+		},
+	}
+	fileConfig := NewFileConfig(audience, mountPath, volumeName, tokenName, fullUri)
+	assert.NoError(t, fileConfig.Load(defaultConfigObjectBytesFor(configObject)))
+
+	workloadPatch := fileConfig.Get(namespaceFoo, namespaceFooServiceAccount)
+	assert.NotNil(t, workloadPatch)
+	assert.True(t, workloadPatch.WorkloadIdentityEnabled)
+
+	legacyPatch := fileConfig.Get(namespaceBar, namespaceBarServiceAccount)
+	assert.NotNil(t, legacyPatch)
+	assert.False(t, legacyPatch.WorkloadIdentityEnabled)
 }
 
 func defaultConfigObject() *IdentityConfigObject {
@@ -152,7 +179,10 @@ func defaultConfigObject() *IdentityConfigObject {
 }
 
 func defaultConfigObjectBytes() []byte {
-	configObject := defaultConfigObject()
+	return defaultConfigObjectBytesFor(defaultConfigObject())
+}
+
+func defaultConfigObjectBytesFor(configObject *IdentityConfigObject) []byte {
 	jsonBytes, err := json.Marshal(configObject)
 	if err != nil {
 		panic(err)
@@ -162,6 +192,8 @@ func defaultConfigObjectBytes() []byte {
 
 func verifyConfigObject(t *testing.T, fileConfig *FileConfig, expected *IdentityConfigObject) {
 	assert.Eventually(t, func() bool {
+		fileConfig.mu.RLock()
+		defer fileConfig.mu.RUnlock()
 		return reflect.DeepEqual(fileConfig.identityConfigObject, expected)
 	}, defaultTimeout, defaultPollInterval)
 }

@@ -31,8 +31,8 @@ import (
 
 	"github.com/aws/amazon-eks-pod-identity-webhook/pkg"
 	"github.com/aws/amazon-eks-pod-identity-webhook/pkg/cache"
-	"k8s.io/api/admission/v1beta1"
-	admissionregistrationv1beta1 "k8s.io/api/admissionregistration/v1beta1"
+	admissionv1 "k8s.io/api/admission/v1"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -42,7 +42,7 @@ import (
 
 func init() {
 	_ = corev1.AddToScheme(runtimeScheme)
-	_ = admissionregistrationv1beta1.AddToScheme(runtimeScheme)
+	_ = admissionregistrationv1.AddToScheme(runtimeScheme)
 }
 
 var (
@@ -152,6 +152,7 @@ type podPatchConfig struct {
 	TokenPath                       string
 	WebIdentityPatchConfig          *webIdentityPatchConfig
 	ContainerCredentialsPatchConfig *containercredentials.PatchConfig
+	WorkloadIdentityEnabled         bool
 }
 
 type webIdentityPatchConfig struct {
@@ -239,15 +240,16 @@ func (m *Modifier) addEnvToContainer(container *corev1.Container, tokenFilePath 
 		}
 	}
 
+	workloadIdentityChanged := addWorkloadIdentityToContainer(container, patchConfig.WorkloadIdentityEnabled)
 	if ((patchConfig.WebIdentityPatchConfig != nil && webIdentityKeysDefined) ||
 		(patchConfig.ContainerCredentialsPatchConfig != nil && containerCredentialsKeysDefined)) &&
-		regionKeyDefined && regionalStsKeyDefined &&
+		regionKeyDefined && regionalStsKeyDefined && !workloadIdentityChanged &&
 		(endpointKeysDefined || (m.EndpointUrl == "" && m.S3EndpointUrl == "" && m.StsEndpointUrl == "")) {
 		klog.V(4).Infof("Container %s has necessary env variables already present", container.Name)
 		return false
 	}
 
-	changed := false
+	changed := workloadIdentityChanged
 	env := container.Env
 
 	if !regionalStsKeyDefined && patchConfig.UseRegionalSTS {
@@ -375,6 +377,9 @@ func (m *Modifier) getPodSpecPatch(pod *corev1.Pod, patchConfig *podPatchConfig)
 		// Eg. /var/run/secrets/eks.amazonaws.com/serviceaccount/token to
 		//     C:\var\run\secrets\eks.amazonaws.com\serviceaccount\token
 		tokenFilePath = "C:" + strings.Replace(tokenFilePath, `/`, `\`, -1)
+
+		// Workload identity socket injection is not yet supported for Windows pods.
+		patchConfig.WorkloadIdentityEnabled = false
 	}
 
 	var changed bool
@@ -420,6 +425,26 @@ func (m *Modifier) getPodSpecPatch(pod *corev1.Pod, patchConfig *podPatchConfig)
 
 	patch := []patchOperation{}
 
+	// Add label for container credentials mode
+	if patchConfig.ContainerCredentialsPatchConfig != nil {
+		if pod.Labels == nil {
+			patch = append(patch, patchOperation{
+				Op:   "add",
+				Path: "/metadata/labels",
+				Value: map[string]string{
+					"eks.amazonaws.com/pod-identity": "enabled",
+				},
+			})
+		} else {
+			patch = append(patch, patchOperation{
+				Op:    "add",
+				Path:  "/metadata/labels/eks.amazonaws.com~1pod-identity",
+				Value: "enabled",
+			})
+		}
+		changed = true
+	}
+
 	// skip adding volume if it already exists
 	volExists := false
 	for _, vol := range pod.Spec.Volumes {
@@ -446,6 +471,11 @@ func (m *Modifier) getPodSpecPatch(pod *corev1.Pod, patchConfig *podPatchConfig)
 		}
 
 		patch = append(patch, volPatch)
+		changed = true
+	}
+
+	if operation, ok := workloadIdentityPodVolumePatch(pod.Spec.Volumes, patchConfig.WorkloadIdentityEnabled); ok {
+		patch = append(patch, operation)
 		changed = true
 	}
 
@@ -494,6 +524,7 @@ func (m *Modifier) buildPodPatchConfig(pod *corev1.Pod) *podPatchConfig {
 			TokenPath:                       containerCredentialsPatchConfig.TokenPath,
 			WebIdentityPatchConfig:          nil,
 			ContainerCredentialsPatchConfig: containerCredentialsPatchConfig,
+			WorkloadIdentityEnabled:         containerCredentialsPatchConfig.WorkloadIdentityEnabled,
 		}
 	}
 
@@ -554,8 +585,8 @@ func (m *Modifier) addJitterToDefaultToken(tokenExpiration int64) int64 {
 }
 
 // MutatePod takes a AdmissionReview, mutates the pod, and returns an AdmissionResponse
-func (m *Modifier) MutatePod(ar *v1beta1.AdmissionReview) *v1beta1.AdmissionResponse {
-	badRequest := &v1beta1.AdmissionResponse{
+func (m *Modifier) MutatePod(ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
+	badRequest := &admissionv1.AdmissionResponse{
 		Result: &metav1.Status{
 			Message: "bad content",
 		},
@@ -572,7 +603,7 @@ func (m *Modifier) MutatePod(ar *v1beta1.AdmissionReview) *v1beta1.AdmissionResp
 	if err := json.Unmarshal(req.Object.Raw, &pod); err != nil {
 		klog.Errorf("Could not unmarshal raw object: %v", err)
 		klog.Errorf("Object: %v", string(req.Object.Raw))
-		return &v1beta1.AdmissionResponse{
+		return &admissionv1.AdmissionResponse{
 			Result: &metav1.Status{
 				Message: err.Error(),
 			},
@@ -585,7 +616,7 @@ func (m *Modifier) MutatePod(ar *v1beta1.AdmissionReview) *v1beta1.AdmissionResp
 	if patchConfig == nil {
 		klog.V(4).Infof("Pod was not mutated. Reason: "+
 			"Service account did not have the right annotations or was not found in the cache. %s", logContext(pod.Name, pod.GenerateName, pod.Spec.ServiceAccountName, pod.Namespace))
-		return &v1beta1.AdmissionResponse{
+		return &admissionv1.AdmissionResponse{
 			Allowed: true,
 		}
 	}
@@ -594,7 +625,7 @@ func (m *Modifier) MutatePod(ar *v1beta1.AdmissionReview) *v1beta1.AdmissionResp
 	patchBytes, err := json.Marshal(patch)
 	if err != nil {
 		klog.Errorf("Error marshaling pod update: %v", err.Error())
-		return &v1beta1.AdmissionResponse{
+		return &admissionv1.AdmissionResponse{
 			Result: &metav1.Status{
 				Message: err.Error(),
 			},
@@ -609,11 +640,11 @@ func (m *Modifier) MutatePod(ar *v1beta1.AdmissionReview) *v1beta1.AdmissionResp
 			"Required volume mounts and env variables were already present. %s", logContext(pod.Name, pod.GenerateName, pod.Spec.ServiceAccountName, pod.Namespace))
 	}
 
-	return &v1beta1.AdmissionResponse{
+	return &admissionv1.AdmissionResponse{
 		Allowed: true,
 		Patch:   patchBytes,
-		PatchType: func() *v1beta1.PatchType {
-			pt := v1beta1.PatchTypeJSONPatch
+		PatchType: func() *admissionv1.PatchType {
+			pt := admissionv1.PatchTypeJSONPatch
 			return &pt
 		}(),
 	}
@@ -636,11 +667,11 @@ func (m *Modifier) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var admissionResponse *v1beta1.AdmissionResponse
-	ar := v1beta1.AdmissionReview{}
+	var admissionResponse *admissionv1.AdmissionResponse
+	ar := admissionv1.AdmissionReview{}
 	if _, _, err := deserializer.Decode(body, nil, &ar); err != nil {
 		klog.Errorf("Can't decode body: %v", err)
-		admissionResponse = &v1beta1.AdmissionResponse{
+		admissionResponse = &admissionv1.AdmissionResponse{
 			Result: &metav1.Status{
 				Message: err.Error(),
 			},
@@ -649,7 +680,8 @@ func (m *Modifier) Handle(w http.ResponseWriter, r *http.Request) {
 		admissionResponse = m.MutatePod(&ar)
 	}
 
-	admissionReview := v1beta1.AdmissionReview{}
+	admissionReview := admissionv1.AdmissionReview{}
+	admissionReview.TypeMeta = ar.TypeMeta
 	if admissionResponse != nil {
 		admissionReview.Response = admissionResponse
 		if ar.Request != nil {
