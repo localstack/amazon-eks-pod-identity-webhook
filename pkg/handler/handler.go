@@ -84,6 +84,11 @@ func WithS3Endpoint(endpointUrl string) ModifierOpt {
 	return func(m *Modifier) { m.S3EndpointUrl = endpointUrl }
 }
 
+// WithStsEndpoint sets the modifier sts endpoint url
+func WithStsEndpoint(endpointUrl string) ModifierOpt {
+	return func(m *Modifier) { m.StsEndpointUrl = endpointUrl }
+}
+
 // WithAnnotationDomain adds an annotation domain
 func WithAnnotationDomain(domain string) ModifierOpt {
 	return func(m *Modifier) { m.AnnotationDomain = domain }
@@ -122,6 +127,7 @@ type Modifier struct {
 	Region                     string
 	EndpointUrl                string
 	S3EndpointUrl              string
+	StsEndpointUrl             string
 	Cache                      cache.ServiceAccountCache
 	ContainerCredentialsConfig containercredentials.Config
 	volName                    string
@@ -204,8 +210,9 @@ func (m *Modifier) addEnvToContainer(container *corev1.Container, tokenFilePath 
 	stsKey := "AWS_STS_REGIONAL_ENDPOINTS"
 
 	endpointKeys := map[string]string{
-		"AWS_ENDPOINT_URL":    "",
-		"AWS_ENDPOINT_URL_S3": "",
+		"AWS_ENDPOINT_URL":     "",
+		"AWS_ENDPOINT_URL_S3":  "",
+		"AWS_ENDPOINT_URL_STS": "",
 	}
 	for _, env := range container.Env {
 		if _, ok := webIdentityKeys[env.Name]; ok {
@@ -234,7 +241,8 @@ func (m *Modifier) addEnvToContainer(container *corev1.Container, tokenFilePath 
 
 	if ((patchConfig.WebIdentityPatchConfig != nil && webIdentityKeysDefined) ||
 		(patchConfig.ContainerCredentialsPatchConfig != nil && containerCredentialsKeysDefined)) &&
-		regionKeyDefined && regionalStsKeyDefined && endpointKeysDefined {
+		regionKeyDefined && regionalStsKeyDefined &&
+		(endpointKeysDefined || (m.EndpointUrl == "" && m.S3EndpointUrl == "" && m.StsEndpointUrl == "")) {
 		klog.V(4).Infof("Container %s has necessary env variables already present", container.Name)
 		return false
 	}
@@ -273,6 +281,15 @@ func (m *Modifier) addEnvToContainer(container *corev1.Container, tokenFilePath 
 			env = append(env, corev1.EnvVar{
 				Name:  "AWS_ENDPOINT_URL_S3",
 				Value: m.S3EndpointUrl,
+			})
+			changed = true
+		}
+		// The Go SDK v2 builds its web identity STS client before applying AWS_ENDPOINT_URL,
+		// so the STS endpoint has to be set explicitly.
+		if m.StsEndpointUrl != "" {
+			env = append(env, corev1.EnvVar{
+				Name:  "AWS_ENDPOINT_URL_STS",
+				Value: m.StsEndpointUrl,
 			})
 			changed = true
 		}

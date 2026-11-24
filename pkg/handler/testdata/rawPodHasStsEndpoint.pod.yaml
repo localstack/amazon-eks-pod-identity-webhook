@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hasstsendpoint
+  annotations:
+    testing.eks.amazonaws.com/skip: "false"
+    testing.eks.amazonaws.com/serviceAccount/roleArn: "arn:aws:iam::000000000000:role/external-dns"
+    testing.eks.amazonaws.com/serviceAccount/audience: "sts.amazonaws.com"
+    testing.eks.amazonaws.com/handler/region: "us-east-1"
+    testing.eks.amazonaws.com/handler/endpointUrl: "http://localhost.localstack.cloud:4566"
+    testing.eks.amazonaws.com/handler/endpointUrlS3: "http://s3.localhost.localstack.cloud:4566"
+    testing.eks.amazonaws.com/handler/endpointUrlSts: "http://localhost.localstack.cloud:4566"
+    testing.eks.amazonaws.com/expectedPatch: '[{"op":"add","path":"/spec/volumes","value":[{"name":"aws-iam-token","projected":{"sources":[{"serviceAccountToken":{"audience":"sts.amazonaws.com","expirationSeconds":86400,"path":"token"}}]}}]},{"op":"add","path":"/spec/containers","value":[{"name":"hasstsendpoint","image":"amazonlinux","env":[{"name":"AWS_ENDPOINT_URL_STS","value":"http://custom-sts:4566"},{"name":"AWS_DEFAULT_REGION","value":"us-east-1"},{"name":"AWS_REGION","value":"us-east-1"},{"name":"AWS_ROLE_ARN","value":"arn:aws:iam::000000000000:role/external-dns"},{"name":"AWS_WEB_IDENTITY_TOKEN_FILE","value":"/var/run/secrets/eks.amazonaws.com/serviceaccount/token"}],"resources":{},"volumeMounts":[{"name":"aws-iam-token","readOnly":true,"mountPath":"/var/run/secrets/eks.amazonaws.com/serviceaccount"}]}]}]'
+spec:
+  containers:
+  - env:
+    - name: AWS_ENDPOINT_URL_STS
+      value: http://custom-sts:4566
+    image: amazonlinux
+    name: hasstsendpoint
+  serviceAccountName: default
